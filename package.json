@@ -2,6 +2,20 @@
   "name": "codex-a2a",
   "version": "0.1.0",
   "description": "A2A server adapter for OpenAI Codex",
+  "keywords": [
+    "a2a",
+    "agent",
+    "codex",
+    "json-rpc",
+    "openai",
+    "rest",
+    "server",
+    "sdk"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/MyPrototypeWhat/codex-a2a.git"
+  },
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -15,7 +29,7 @@
     "dist"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "tsdown",
     "clean": "rm -rf dist",
     "test": "vitest run",
     "test:watch": "vitest",
@@ -29,6 +43,7 @@
   "devDependencies": {
     "@types/express": "^4.17.21",
     "@types/node": "^20.17.0",
+    "tsdown": "^0.8.2",
     "typescript": "^5.6.3",
     "vitest": "^2.1.3"
   },
