@@ -154,8 +154,8 @@ describe('CodexExecutor', () => {
 
     const executor = new CodexExecutor({
       codex,
-      getConfig: () => ({
-        networkAccess: false,
+      getThreadOptions: () => ({
+        networkAccessEnabled: false,
         webSearchEnabled: false,
         sandboxMode: 'read-only',
         approvalPolicy: 'never',

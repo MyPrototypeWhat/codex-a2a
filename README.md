@@ -15,10 +15,13 @@ import { CodexA2AServer } from 'codex-a2a'
 
 const server = new CodexA2AServer({
   port: 50002,
-  getConfig: () => ({
+  getThreadOptions: () => ({
     workingDirectory: process.cwd(),
     webSearchEnabled: true,
-    networkAccess: true,
+    networkAccessEnabled: true,
+  }),
+  getTurnOptions: () => ({
+    outputSchema: undefined,
   }),
 })
 
@@ -73,14 +76,14 @@ await server.start()
 
 ## Configuration
 
-`getConfig(contextId)` lets you override Codex runtime settings per context. The default values are exported as `DEFAULT_CODEX_CONFIG`.
+`getThreadOptions(contextId)` lets you override Codex thread options per context. The default values are exported as `DEFAULT_THREAD_OPTIONS`.
 
 ```ts
-import { CodexA2AServer, DEFAULT_CODEX_CONFIG } from 'codex-a2a'
+import { CodexA2AServer, DEFAULT_THREAD_OPTIONS } from 'codex-a2a'
 
 const server = new CodexA2AServer({
-  getConfig: () => ({
-    ...DEFAULT_CODEX_CONFIG,
+  getThreadOptions: () => ({
+    ...DEFAULT_THREAD_OPTIONS,
     sandboxMode: 'read-only',
     approvalPolicy: 'never',
     webSearchEnabled: false,
@@ -89,6 +92,8 @@ const server = new CodexA2AServer({
 ```
 
 `getWorkingDirectory(contextId)` provides a per-context working directory override.
+
+`getTurnOptions(contextId)` lets you override per-turn options for `runStreamed`, such as `outputSchema` or `signal`.
 
 ## API
 

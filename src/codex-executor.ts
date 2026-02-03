@@ -1,7 +1,7 @@
 import type { Message, Task, TaskStatusUpdateEvent } from '@a2a-js/sdk'
 import type { AgentExecutor, ExecutionEventBus, RequestContext } from '@a2a-js/sdk/server'
-import type { Codex, Thread, ThreadOptions } from '@openai/codex-sdk'
-import { DEFAULT_CODEX_CONFIG, type CodexConfig } from './config'
+import type { Codex, Thread, ThreadOptions, TurnOptions } from '@openai/codex-sdk'
+import { DEFAULT_THREAD_OPTIONS } from './config'
 
 type ThreadLike = Pick<Thread, 'runStreamed'>
 
@@ -11,7 +11,8 @@ type CodexLike = {
 
 export interface CodexExecutorOptions {
   codex: CodexLike
-  getConfig?: (contextId: string) => Partial<CodexConfig>
+  getThreadOptions?: (contextId: string) => Partial<ThreadOptions>
+  getTurnOptions?: (contextId: string) => TurnOptions | undefined
   getWorkingDirectory?: (contextId: string) => string | undefined
   logger?: Pick<Console, 'log' | 'error'>
 }
@@ -22,13 +23,15 @@ export class CodexExecutor implements AgentExecutor {
   private canceledTasks = new Set<string>()
   private taskContexts = new Map<string, string>()
   private codex: CodexLike
-  private getConfig: (contextId: string) => Partial<CodexConfig>
+  private getThreadOptions: (contextId: string) => Partial<ThreadOptions>
+  private getTurnOptions?: (contextId: string) => TurnOptions | undefined
   private getWorkingDirectory?: (contextId: string) => string | undefined
   private logger: Pick<Console, 'log' | 'error'>
 
-  constructor({ codex, getConfig, getWorkingDirectory, logger }: CodexExecutorOptions) {
+  constructor({ codex, getThreadOptions, getTurnOptions, getWorkingDirectory, logger }: CodexExecutorOptions) {
     this.codex = codex
-    this.getConfig = getConfig ?? (() => ({}))
+    this.getThreadOptions = getThreadOptions ?? (() => ({}))
+    this.getTurnOptions = getTurnOptions
     this.getWorkingDirectory = getWorkingDirectory
     this.logger = logger ?? console
   }
@@ -68,9 +71,9 @@ export class CodexExecutor implements AgentExecutor {
 
     let thread = this.threads.get(contextId)
 
-    const config = this.resolveConfig(contextId)
+    const threadOptions = this.resolveThreadOptions(contextId)
     const workingDirOverride = this.getWorkingDirectory?.(contextId)
-    const workingDir = workingDirOverride || this.normalizeWorkingDirectory(config.workingDirectory)
+    const workingDir = workingDirOverride || this.normalizeWorkingDirectory(threadOptions.workingDirectory)
 
     const currentWorkingDir = workingDir || process.cwd()
     const existingThreadKey = `${contextId}:${currentWorkingDir}`
@@ -82,26 +85,25 @@ export class CodexExecutor implements AgentExecutor {
     }
 
     if (!thread) {
-      thread = this.codex.startThread({
-        skipGitRepoCheck: true,
-        webSearchEnabled: config.webSearchEnabled,
-        networkAccessEnabled: config.networkAccess,
-        webSearchMode: 'live',
+      const resolvedThreadOptions: ThreadOptions = {
+        ...threadOptions,
+        skipGitRepoCheck: threadOptions.skipGitRepoCheck ?? true,
         workingDirectory: workingDir || undefined,
-        sandboxMode: config.sandboxMode,
-        approvalPolicy: config.approvalPolicy === 'never' ? 'never' : config.approvalPolicy,
-      })
+      }
+
+      thread = this.codex.startThread(resolvedThreadOptions)
       this.threads.set(contextId, thread)
       this.threadWorkingDirs.set(contextId, existingThreadKey)
       this.logger.log('[Codex A2A] Thread started with config:', {
         workingDirectory: workingDir || process.cwd(),
-        webSearchEnabled: config.webSearchEnabled,
-        networkAccess: config.networkAccess,
-        sandboxMode: config.sandboxMode,
+        webSearchEnabled: resolvedThreadOptions.webSearchEnabled,
+        networkAccess: resolvedThreadOptions.networkAccessEnabled,
+        sandboxMode: resolvedThreadOptions.sandboxMode,
       })
     }
 
-    const { events } = await thread.runStreamed(text)
+    const turnOptions = this.getTurnOptions?.(contextId)
+    const { events } = await thread.runStreamed(text, turnOptions)
     const sentTextLengths = new Map<string, number>()
     const sentItemStates = new Map<string, string>()
 
@@ -316,8 +318,8 @@ export class CodexExecutor implements AgentExecutor {
     eventBus.finished()
   }
 
-  private resolveConfig(contextId: string): CodexConfig {
-    return { ...DEFAULT_CODEX_CONFIG, ...this.getConfig(contextId) }
+  private resolveThreadOptions(contextId: string): ThreadOptions {
+    return { ...DEFAULT_THREAD_OPTIONS, ...this.getThreadOptions(contextId) }
   }
 
   private normalizeWorkingDirectory(workingDirectory?: string): string | undefined {

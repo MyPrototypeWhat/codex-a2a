@@ -6,14 +6,15 @@ import { agentCardHandler, jsonRpcHandler, restHandler, UserBuilder } from '@a2a
 import type { Codex } from '@openai/codex-sdk'
 import express, { type Express } from 'express'
 import { CodexExecutor } from './codex-executor'
-import type { CodexConfig } from './config'
+import type { ThreadOptions, TurnOptions } from '@openai/codex-sdk'
 
 export interface CodexA2AServerOptions {
   port?: number
   agentCard?: Partial<AgentCard>
   codex?: Codex
   codexFactory?: () => Codex | Promise<Codex>
-  getConfig?: (contextId: string) => Partial<CodexConfig>
+  getThreadOptions?: (contextId: string) => Partial<ThreadOptions>
+  getTurnOptions?: (contextId: string) => TurnOptions | undefined
   getWorkingDirectory?: (contextId: string) => string | undefined
   logger?: Pick<Console, 'log' | 'error'>
   configureApp?: (
@@ -70,7 +71,8 @@ export class CodexA2AServer extends EventEmitter {
     const agentCard = this.buildAgentCard(port, this.options.agentCard)
     const executor = new CodexExecutor({
       codex,
-      getConfig: this.options.getConfig,
+      getThreadOptions: this.options.getThreadOptions,
+      getTurnOptions: this.options.getTurnOptions,
       getWorkingDirectory: this.options.getWorkingDirectory,
       logger,
     })

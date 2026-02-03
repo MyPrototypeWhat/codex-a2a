@@ -1,29 +1,10 @@
-export type CodexSandboxMode = 'read-only' | 'workspace-write' | 'danger-full-access'
-export type CodexApprovalPolicy = 'untrusted' | 'on-failure' | 'on-request' | 'never'
-export type CodexReasoningEffort = 'minimal' | 'low' | 'medium' | 'high'
+import type { ThreadOptions } from '@openai/codex-sdk'
 
-export interface CodexConfig {
-  model: string
-  maxTokens: number
-  autoApprove: boolean
-  sandboxMode: CodexSandboxMode
-  writableRoots: string[]
-  networkAccess: boolean
-  approvalPolicy: CodexApprovalPolicy
-  webSearchEnabled: boolean
-  reasoningEffort: CodexReasoningEffort
-  workingDirectory?: string
-}
-
-export const DEFAULT_CODEX_CONFIG: CodexConfig = {
-  model: 'gpt-5-codex',
-  maxTokens: 4096,
-  autoApprove: false,
+export const DEFAULT_THREAD_OPTIONS: ThreadOptions = {
   sandboxMode: 'workspace-write',
-  writableRoots: [],
-  networkAccess: true,
+  networkAccessEnabled: true,
   approvalPolicy: 'on-failure',
   webSearchEnabled: true,
-  reasoningEffort: 'medium',
+  modelReasoningEffort: 'medium',
   workingDirectory: '',
 }
