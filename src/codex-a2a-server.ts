@@ -8,6 +8,12 @@ import express, { type Express } from 'express'
 import { CodexExecutor } from './codex-executor'
 import type { ThreadOptions, TurnOptions } from '@openai/codex-sdk'
 
+export interface CorsOptions {
+  origin?: string | string[]
+  methods?: string[]
+  headers?: string[]
+}
+
 export interface CodexA2AServerOptions {
   port?: number
   agentCard?: Partial<AgentCard>
@@ -16,7 +22,13 @@ export interface CodexA2AServerOptions {
   getThreadOptions?: (contextId: string) => Partial<ThreadOptions>
   getTurnOptions?: (contextId: string) => TurnOptions | undefined
   getWorkingDirectory?: (contextId: string) => string | undefined
+  /** Maximum cached threads before LRU eviction (default: 64) */
+  maxThreads?: number
   logger?: Pick<Console, 'log' | 'error'>
+  /** CORS configuration. Defaults to allow all origins. */
+  cors?: CorsOptions
+  /** Timeout in ms for graceful shutdown (default: 5000) */
+  shutdownTimeout?: number
   configureApp?: (
     app: Express,
     context: {
@@ -28,11 +40,13 @@ export interface CodexA2AServerOptions {
 }
 
 const DEFAULT_PORT = 50002
+const MAX_PORT_SCAN = 100
 
 export class CodexA2AServer extends EventEmitter {
   private server: http.Server | null = null
   private serverUrl: string | null = null
   private requestHandler: DefaultRequestHandler | null = null
+  private executor: CodexExecutor | null = null
   private running = false
   private options: CodexA2AServerOptions
 
@@ -53,20 +67,11 @@ export class CodexA2AServer extends EventEmitter {
     if (this.running) return
 
     const logger = this.options.logger ?? console
-    const codex = await this.resolveCodex()
+    const codex = await this.resolveCodex(logger)
     const port = await this.findAvailablePort(this.options.port ?? DEFAULT_PORT)
 
     const app = express()
-    app.use((req, res, next) => {
-      res.setHeader('Access-Control-Allow-Origin', '*')
-      res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
-      res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Accept')
-      if (req.method === 'OPTIONS') {
-        res.status(204).end()
-        return
-      }
-      next()
-    })
+    this.applyCors(app)
 
     const agentCard = this.buildAgentCard(port, this.options.agentCard)
     const executor = new CodexExecutor({
@@ -74,8 +79,10 @@ export class CodexA2AServer extends EventEmitter {
       getThreadOptions: this.options.getThreadOptions,
       getTurnOptions: this.options.getTurnOptions,
       getWorkingDirectory: this.options.getWorkingDirectory,
+      maxThreads: this.options.maxThreads,
       logger,
     })
+    this.executor = executor
     this.requestHandler = new DefaultRequestHandler(agentCard, new InMemoryTaskStore(), executor)
 
     app.use(`/${AGENT_CARD_PATH}`, agentCardHandler({ agentCardProvider: this.requestHandler }))
@@ -122,13 +129,33 @@ export class CodexA2AServer extends EventEmitter {
 
   async stop(): Promise<void> {
     if (!this.server) return
-    await new Promise<void>((resolve) => {
-      this.server!.close(() => resolve())
-    })
+
+    const timeout = this.options.shutdownTimeout ?? 5000
+
+    // Stop accepting new connections
+    this.server.close()
+
+    // Wait for existing connections to finish with timeout
+    await Promise.race([
+      new Promise<void>((resolve) => {
+        this.server!.on('close', () => resolve())
+      }),
+      new Promise<void>((resolve) => {
+        setTimeout(() => {
+          this.server!.closeAllConnections?.()
+          resolve()
+        }, timeout)
+      }),
+    ])
+
+    // Clean up executor thread cache
+    this.executor?.clearThreads()
+
     this.server = null
     this.serverUrl = null
     this.running = false
     this.requestHandler = null
+    this.executor = null
     this.emit('status', { status: 'disconnected' })
   }
 
@@ -137,16 +164,48 @@ export class CodexA2AServer extends EventEmitter {
     await this.requestHandler.cancelTask({ id: taskId })
   }
 
-  private async resolveCodex(): Promise<Codex> {
+  private applyCors(app: Express): void {
+    const cors = this.options.cors
+    const origin = cors?.origin ?? '*'
+    const methods = cors?.methods ?? ['GET', 'POST', 'OPTIONS']
+    const headers = cors?.headers ?? ['Content-Type', 'Accept']
+
+    app.use((req, res, next) => {
+      const originHeader = typeof origin === 'string'
+        ? origin
+        : (Array.isArray(origin) && origin.includes(req.headers.origin ?? '')
+          ? req.headers.origin!
+          : origin[0] ?? '*')
+
+      res.setHeader('Access-Control-Allow-Origin', originHeader)
+      res.setHeader('Access-Control-Allow-Methods', methods.join(', '))
+      res.setHeader('Access-Control-Allow-Headers', headers.join(', '))
+      if (req.method === 'OPTIONS') {
+        res.status(204).end()
+        return
+      }
+      next()
+    })
+  }
+
+  private async resolveCodex(logger: Pick<Console, 'error'>): Promise<Codex> {
     if (this.options.codex) return this.options.codex
     if (this.options.codexFactory) return await this.options.codexFactory()
-    const { Codex } = await import('@openai/codex-sdk')
-    return new Codex({
-      env: {
-        ...process.env,
-        PATH: process.env.PATH || '/usr/local/bin:/usr/bin:/bin',
-      },
-    })
+    try {
+      const { Codex } = await import('@openai/codex-sdk')
+      return new Codex({
+        env: {
+          ...process.env,
+          PATH: process.env.PATH || '/usr/local/bin:/usr/bin:/bin',
+        },
+      })
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      logger.error('[Codex A2A] Failed to load @openai/codex-sdk:', message)
+      throw new Error(
+        'Failed to load @openai/codex-sdk. Make sure it is installed: npm install @openai/codex-sdk'
+      )
+    }
   }
 
   private buildAgentCard(port: number, overrides?: Partial<AgentCard>): AgentCard {
@@ -154,7 +213,7 @@ export class CodexA2AServer extends EventEmitter {
       name: 'Codex',
       description: 'OpenAI coding agent powered by Codex SDK',
       protocolVersion: '0.3.0',
-      version: '0.1.0',
+      version: '0.2.0',
       url: `http://localhost:${port}/a2a/jsonrpc`,
       provider: {
         organization: 'OpenAI',
@@ -242,13 +301,20 @@ export class CodexA2AServer extends EventEmitter {
   }
 
   private async findAvailablePort(startPort: number): Promise<number> {
+    for (let port = startPort; port < startPort + MAX_PORT_SCAN; port++) {
+      if (await this.isPortAvailable(port)) return port
+    }
+    throw new Error(`No available port found in range ${startPort}-${startPort + MAX_PORT_SCAN - 1}`)
+  }
+
+  private isPortAvailable(port: number): Promise<boolean> {
     return new Promise((resolve) => {
       const server = http.createServer()
-      server.listen(startPort, () => {
-        server.close(() => resolve(startPort))
+      server.listen(port, () => {
+        server.close(() => resolve(true))
       })
       server.on('error', () => {
-        resolve(this.findAvailablePort(startPort + 1))
+        resolve(false)
       })
     })
   }

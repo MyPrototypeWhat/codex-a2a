@@ -1,6 +1,6 @@
 {
   "name": "codex-a2a",
-  "version": "0.1.2",
+  "version": "0.2.0",
   "description": "A2A server adapter for OpenAI Codex",
   "keywords": [
     "a2a",
@@ -34,14 +34,18 @@
     "clean": "rm -rf dist",
     "test": "vitest run",
     "test:watch": "vitest",
-    "typecheck": "tsc -p tsconfig.json --noEmit"
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "changeset": "changeset",
+    "version": "changeset version",
+    "release": "pnpm run build && changeset publish"
   },
   "dependencies": {
-    "@a2a-js/sdk": "^0.3.0",
-    "@openai/codex-sdk": "^0.92.0",
+    "@a2a-js/sdk": "^0.3.13",
+    "@openai/codex-sdk": "^0.116.0",
     "express": "^4.19.2"
   },
   "devDependencies": {
+    "@changesets/cli": "^2.29.0",
     "@types/express": "^4.17.21",
     "@types/node": "^20.17.0",
     "tsdown": "^0.20.1",
@@ -51,5 +55,5 @@
   "engines": {
     "node": ">=18"
   },
-  "license": "Apache-2.0"
+  "license": "MIT"
 }

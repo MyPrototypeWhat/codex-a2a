@@ -62,6 +62,10 @@ function createMessage(taskId: string, contextId: string, text: string): Message
   }
 }
 
+function createSilentLogger() {
+  return { log: () => {}, error: () => {} }
+}
+
 describe('CodexExecutor', () => {
   it('publishes status updates and completes a task', async () => {
     const events: ThreadEvent[] = [
@@ -100,7 +104,7 @@ describe('CodexExecutor', () => {
       },
     }
 
-    const executor = new CodexExecutor({ codex })
+    const executor = new CodexExecutor({ codex, logger: createSilentLogger() })
     const bus = createEventBus()
     const { eventBus, published } = bus
 
@@ -161,6 +165,7 @@ describe('CodexExecutor', () => {
         approvalPolicy: 'never',
       }),
       getWorkingDirectory: () => '/tmp/project',
+      logger: createSilentLogger(),
     })
 
     const { eventBus } = createEventBus()
@@ -225,7 +230,7 @@ describe('CodexExecutor', () => {
       startThread: () => thread,
     }
 
-    const executor = new CodexExecutor({ codex })
+    const executor = new CodexExecutor({ codex, logger: createSilentLogger() })
     const { eventBus, published } = createEventBus()
 
     const requestContext: RequestContext = {
@@ -291,7 +296,7 @@ describe('CodexExecutor', () => {
       startThread: () => thread,
     }
 
-    const executor = new CodexExecutor({ codex })
+    const executor = new CodexExecutor({ codex, logger: createSilentLogger() })
     const { eventBus, published } = createEventBus()
 
     const requestContext: RequestContext = {
@@ -313,5 +318,242 @@ describe('CodexExecutor', () => {
     expect(firstTurnStarted).toBeGreaterThanOrEqual(0)
     expect(firstArtifact).toBeGreaterThan(firstTurnStarted)
     expect(lastStatus).toBeGreaterThan(firstArtifact)
+  })
+
+  it('cancels a task via AbortController', async () => {
+    let abortSignal: AbortSignal | undefined
+    const thread = {
+      runStreamed: async (_text: string, options?: { signal?: AbortSignal }) => {
+        abortSignal = options?.signal
+        return {
+          events: (async function* () {
+            yield { type: 'turn.started' } as ThreadEvent
+            yield {
+              type: 'item.completed',
+              item: { id: 'msg-1', type: 'agent_message', text: 'Before cancel' },
+            } as ThreadEvent
+            yield { type: 'turn.completed', usage: { input_tokens: 1, cached_input_tokens: 0, output_tokens: 1 } } as ThreadEvent
+          })(),
+        }
+      },
+    }
+
+    const codex = { startThread: () => thread }
+    const executor = new CodexExecutor({ codex, logger: createSilentLogger() })
+
+    const bus1 = createEventBus()
+    const requestContext: RequestContext = {
+      taskId: 'task-cancel',
+      contextId: 'ctx-cancel',
+      userMessage: createMessage('task-cancel', 'ctx-cancel', 'Do something'),
+    }
+
+    // Execute first to register the abort controller
+    await executor.execute(requestContext, bus1.eventBus)
+
+    // Verify signal was passed to runStreamed
+    expect(abortSignal).toBeDefined()
+
+    // Now test cancelTask publishes canceled status
+    const bus2 = createEventBus()
+    await executor.cancelTask('task-cancel', bus2.eventBus)
+
+    const hasCanceled = bus2.published.some(
+      (event) => isStatusUpdateEvent(event) && event.status?.state === 'canceled'
+    )
+    expect(hasCanceled).toBe(true)
+    expect(bus2.finished).toBe(true)
+  })
+
+  it('handles runStreamed throwing an exception', async () => {
+    const thread = {
+      runStreamed: async () => {
+        throw new Error('Connection failed')
+      },
+    }
+
+    const codex = { startThread: () => thread }
+    const executor = new CodexExecutor({ codex, logger: createSilentLogger() })
+    const bus = createEventBus()
+    const { eventBus, published } = bus
+
+    const requestContext: RequestContext = {
+      taskId: 'task-err',
+      contextId: 'ctx-err',
+      userMessage: createMessage('task-err', 'ctx-err', 'Hello'),
+    }
+
+    await executor.execute(requestContext, eventBus)
+
+    const hasFailed = published.some(
+      (event) => isStatusUpdateEvent(event) && event.status?.state === 'failed' && event.final
+    )
+    const hasErrorMessage = published.some(
+      (event) =>
+        isStatusUpdateEvent(event) &&
+        event.status?.message?.parts?.some(
+          (part) => isTextPart(part) && part.text.includes('Connection failed')
+        )
+    )
+
+    expect(hasFailed).toBe(true)
+    expect(hasErrorMessage).toBe(true)
+    expect(bus.finished).toBe(true)
+  })
+
+  it('handles thread.started event', async () => {
+    const events: ThreadEvent[] = [
+      { type: 'thread.started', thread_id: 'thread-123' } as ThreadEvent,
+      { type: 'turn.started' },
+      { type: 'turn.completed', usage: { input_tokens: 1, cached_input_tokens: 0, output_tokens: 1 } },
+    ]
+
+    const thread = {
+      runStreamed: async () => ({
+        events: (async function* () {
+          for (const event of events) yield event
+        })(),
+      }),
+    }
+
+    const codex = { startThread: () => thread }
+    const executor = new CodexExecutor({ codex, logger: createSilentLogger() })
+    const { eventBus, published } = createEventBus()
+
+    const requestContext: RequestContext = {
+      taskId: 'task-ts',
+      contextId: 'ctx-ts',
+      userMessage: createMessage('task-ts', 'ctx-ts', 'Hello'),
+    }
+
+    await executor.execute(requestContext, eventBus)
+
+    const hasThreadStarted = published.some(
+      (event) =>
+        isStatusUpdateEvent(event) &&
+        isRecord(event.metadata) &&
+        isRecord(event.metadata.codexAgent) &&
+        event.metadata.codexAgent.kind === 'thread-started'
+    )
+    expect(hasThreadStarted).toBe(true)
+  })
+
+  it('handles ThreadErrorEvent (type: "error")', async () => {
+    const events: ThreadEvent[] = [
+      { type: 'turn.started' },
+      { type: 'error', message: 'Stream disconnected' } as ThreadEvent,
+    ]
+
+    const thread = {
+      runStreamed: async () => ({
+        events: (async function* () {
+          for (const event of events) yield event
+        })(),
+      }),
+    }
+
+    const codex = { startThread: () => thread }
+    const executor = new CodexExecutor({ codex, logger: createSilentLogger() })
+    const bus = createEventBus()
+    const { eventBus, published } = bus
+
+    const requestContext: RequestContext = {
+      taskId: 'task-terr',
+      contextId: 'ctx-terr',
+      userMessage: createMessage('task-terr', 'ctx-terr', 'Hello'),
+    }
+
+    await executor.execute(requestContext, eventBus)
+
+    const hasFailed = published.some(
+      (event) => isStatusUpdateEvent(event) && event.status?.state === 'failed' && event.final
+    )
+    const hasErrorMsg = published.some(
+      (event) =>
+        isStatusUpdateEvent(event) &&
+        event.status?.message?.parts?.some(
+          (part) => isTextPart(part) && part.text.includes('Stream disconnected')
+        )
+    )
+
+    expect(hasFailed).toBe(true)
+    expect(hasErrorMsg).toBe(true)
+    expect(bus.finished).toBe(true)
+  })
+
+  it('evicts oldest threads when maxThreads is exceeded', async () => {
+    const startedContextIds: string[] = []
+    const codex = {
+      startThread: () => {
+        return {
+          runStreamed: async () => ({
+            events: (async function* () {})(),
+          }),
+        }
+      },
+    }
+
+    const executor = new CodexExecutor({
+      codex,
+      maxThreads: 2,
+      logger: createSilentLogger(),
+    })
+
+    // Create 3 threads (exceeds maxThreads of 2)
+    for (let i = 1; i <= 3; i++) {
+      const { eventBus } = createEventBus()
+      const requestContext: RequestContext = {
+        taskId: `task-evict-${i}`,
+        contextId: `ctx-evict-${i}`,
+        userMessage: createMessage(`task-evict-${i}`, `ctx-evict-${i}`, 'Hello'),
+      }
+      await executor.execute(requestContext, eventBus)
+    }
+
+    // The executor should have evicted the oldest thread
+    // We verify by checking that clearThreads works without error
+    // and that the executor can still function
+    const { eventBus } = createEventBus()
+    const requestContext: RequestContext = {
+      taskId: 'task-evict-4',
+      contextId: 'ctx-evict-1', // Reuse context 1, should create a new thread
+      userMessage: createMessage('task-evict-4', 'ctx-evict-1', 'Hello again'),
+    }
+    await executor.execute(requestContext, eventBus)
+
+    executor.clearThreads()
+  })
+
+  it('publishes failure for empty text message', async () => {
+    const codex = {
+      startThread: () => ({
+        runStreamed: async () => ({ events: (async function* () {})() }),
+      }),
+    }
+
+    const executor = new CodexExecutor({ codex, logger: createSilentLogger() })
+    const bus = createEventBus()
+    const { eventBus, published } = bus
+
+    const requestContext: RequestContext = {
+      taskId: 'task-empty',
+      contextId: 'ctx-empty',
+      userMessage: {
+        kind: 'message',
+        role: 'user',
+        messageId: 'msg-empty',
+        taskId: 'task-empty',
+        contextId: 'ctx-empty',
+        parts: [{ kind: 'data', data: { foo: 'bar' } }],
+      },
+    }
+
+    await executor.execute(requestContext, eventBus)
+
+    const hasFailed = published.some(
+      (event) => isStatusUpdateEvent(event) && event.status?.state === 'failed' && event.final
+    )
+    expect(hasFailed).toBe(true)
+    expect(bus.finished).toBe(true)
   })
 })

@@ -14,25 +14,30 @@ export interface CodexExecutorOptions {
   getThreadOptions?: (contextId: string) => Partial<ThreadOptions>
   getTurnOptions?: (contextId: string) => TurnOptions | undefined
   getWorkingDirectory?: (contextId: string) => string | undefined
+  /** Maximum number of cached threads before eviction (default: 64) */
+  maxThreads?: number
   logger?: Pick<Console, 'log' | 'error'>
 }
 
 export class CodexExecutor implements AgentExecutor {
   private threads = new Map<string, ThreadLike>()
   private threadWorkingDirs = new Map<string, string>()
-  private canceledTasks = new Set<string>()
+  private threadLastUsed = new Map<string, number>()
+  private abortControllers = new Map<string, AbortController>()
   private taskContexts = new Map<string, string>()
   private codex: CodexLike
+  private maxThreads: number
   private getThreadOptions: (contextId: string) => Partial<ThreadOptions>
   private getTurnOptions?: (contextId: string) => TurnOptions | undefined
   private getWorkingDirectory?: (contextId: string) => string | undefined
   private logger: Pick<Console, 'log' | 'error'>
 
-  constructor({ codex, getThreadOptions, getTurnOptions, getWorkingDirectory, logger }: CodexExecutorOptions) {
+  constructor({ codex, getThreadOptions, getTurnOptions, getWorkingDirectory, maxThreads, logger }: CodexExecutorOptions) {
     this.codex = codex
     this.getThreadOptions = getThreadOptions ?? (() => ({}))
     this.getTurnOptions = getTurnOptions
     this.getWorkingDirectory = getWorkingDirectory
+    this.maxThreads = maxThreads ?? 64
     this.logger = logger ?? console
   }
 
@@ -54,11 +59,6 @@ export class CodexExecutor implements AgentExecutor {
 
     this.publishStatus(eventBus, taskId, contextId, 'working', false, undefined, 'state-change')
 
-    if (this.canceledTasks.has(taskId)) {
-      this.publishCanceled(eventBus, taskId, contextId)
-      return
-    }
-
     const text = userMessage.parts
       .filter((part): part is { kind: 'text'; text: string } => part.kind === 'text')
       .map((part) => part.text)
@@ -69,253 +69,313 @@ export class CodexExecutor implements AgentExecutor {
       return
     }
 
-    let thread = this.threads.get(contextId)
+    const abortController = new AbortController()
+    this.abortControllers.set(taskId, abortController)
 
-    const threadOptions = this.resolveThreadOptions(contextId)
-    const workingDirOverride = this.getWorkingDirectory?.(contextId)
-    const workingDir = workingDirOverride || this.normalizeWorkingDirectory(threadOptions.workingDirectory)
+    try {
+      let thread = this.threads.get(contextId)
 
-    const currentWorkingDir = workingDir || process.cwd()
-    const existingThreadKey = `${contextId}:${currentWorkingDir}`
-    const cachedThreadKey = this.threadWorkingDirs.get(contextId)
+      const threadOptions = this.resolveThreadOptions(contextId)
+      const workingDirOverride = this.getWorkingDirectory?.(contextId)
+      const workingDir = workingDirOverride || this.normalizeWorkingDirectory(threadOptions.workingDirectory)
 
-    if (thread && cachedThreadKey !== existingThreadKey) {
-      this.threads.delete(contextId)
-      thread = undefined
-    }
+      const currentWorkingDir = workingDir || process.cwd()
+      const existingThreadKey = `${contextId}:${currentWorkingDir}`
+      const cachedThreadKey = this.threadWorkingDirs.get(contextId)
 
-    if (!thread) {
-      const resolvedThreadOptions: ThreadOptions = {
-        ...threadOptions,
-        skipGitRepoCheck: threadOptions.skipGitRepoCheck ?? true,
-        workingDirectory: workingDir || undefined,
+      if (thread && cachedThreadKey !== existingThreadKey) {
+        this.threads.delete(contextId)
+        thread = undefined
       }
 
-      thread = this.codex.startThread(resolvedThreadOptions)
-      this.threads.set(contextId, thread)
-      this.threadWorkingDirs.set(contextId, existingThreadKey)
-      this.logger.log('[Codex A2A] Thread started with config:', {
-        workingDirectory: workingDir || process.cwd(),
-        webSearchEnabled: resolvedThreadOptions.webSearchEnabled,
-        networkAccess: resolvedThreadOptions.networkAccessEnabled,
-        sandboxMode: resolvedThreadOptions.sandboxMode,
-      })
-    }
+      if (!thread) {
+        this.evictThreadsIfNeeded()
 
-    const turnOptions = this.getTurnOptions?.(contextId)
-    const { events } = await thread.runStreamed(text, turnOptions)
-    const sentTextLengths = new Map<string, number>()
-    const sentItemStates = new Map<string, string>()
+        const resolvedThreadOptions: ThreadOptions = {
+          ...threadOptions,
+          skipGitRepoCheck: threadOptions.skipGitRepoCheck ?? true,
+          workingDirectory: workingDir || undefined,
+        }
 
-    for await (const event of events) {
-      if (this.canceledTasks.has(taskId)) {
-        this.publishCanceled(eventBus, taskId, contextId)
-        return
+        thread = this.codex.startThread(resolvedThreadOptions)
+        this.threads.set(contextId, thread)
+        this.threadWorkingDirs.set(contextId, existingThreadKey)
+        this.logger.log('[Codex A2A] Thread started with config:', {
+          workingDirectory: workingDir || process.cwd(),
+          webSearchEnabled: resolvedThreadOptions.webSearchEnabled,
+          networkAccess: resolvedThreadOptions.networkAccessEnabled,
+          sandboxMode: resolvedThreadOptions.sandboxMode,
+        })
       }
-      this.logger.log('[Codex A2A] event', event)
-      if (event.type === 'turn.started') {
-        this.publishStatus(eventBus, taskId, contextId, 'working', false, undefined, 'turn-started')
-        continue
-      }
-      if (event.type === 'turn.completed') {
-        this.publishToolOutput(
-          eventBus,
-          taskId,
-          contextId,
-          'turn-usage',
-          this.stringifyToolOutput({ usage: event.usage }),
-          false,
-          true
-        )
-        this.publishStatus(
-          eventBus,
-          taskId,
-          contextId,
-          'working',
-          false,
-          undefined,
-          'turn-completed'
-        )
-        continue
-      }
-      if (event.type === 'turn.failed') {
-        this.publishFailure(eventBus, taskId, contextId, event.error.message)
-        return
-      }
-      if (
-        event.type === 'item.started' ||
-        event.type === 'item.updated' ||
-        event.type === 'item.completed'
-      ) {
-        const item = event.item
-        const isCompleted = event.type === 'item.completed'
 
-        switch (item.type) {
-          case 'agent_message':
-          case 'reasoning': {
-            if (item.text) {
-              const prevLength = sentTextLengths.get(item.id) || 0
-              const deltaText = item.text.slice(prevLength)
-              if (deltaText.length > 0) {
-                sentTextLengths.set(item.id, item.text.length)
-                if (item.type === 'reasoning') {
-                  this.publishThought(eventBus, taskId, contextId, deltaText)
-                } else {
-                  this.publishTextContent(eventBus, taskId, contextId, deltaText)
+      this.threadLastUsed.set(contextId, Date.now())
+
+      const turnOptions = this.getTurnOptions?.(contextId)
+      const mergedTurnOptions: TurnOptions = {
+        ...turnOptions,
+        signal: abortController.signal,
+      }
+
+      const { events } = await thread.runStreamed(text, mergedTurnOptions)
+      const sentTextLengths = new Map<string, number>()
+      const sentItemStates = new Map<string, string>()
+
+      for await (const event of events) {
+        if (abortController.signal.aborted) {
+          this.publishCanceled(eventBus, taskId, contextId)
+          return
+        }
+        this.logger.log('[Codex A2A] event', event)
+
+        if (event.type === 'thread.started') {
+          this.publishStatus(eventBus, taskId, contextId, 'working', false, undefined, 'thread-started')
+          continue
+        }
+        if (event.type === 'turn.started') {
+          this.publishStatus(eventBus, taskId, contextId, 'working', false, undefined, 'turn-started')
+          continue
+        }
+        if (event.type === 'turn.completed') {
+          this.publishToolOutput(
+            eventBus,
+            taskId,
+            contextId,
+            'turn-usage',
+            this.stringifyToolOutput({ usage: event.usage }),
+            false,
+            true
+          )
+          this.publishStatus(
+            eventBus,
+            taskId,
+            contextId,
+            'working',
+            false,
+            undefined,
+            'turn-completed'
+          )
+          continue
+        }
+        if (event.type === 'turn.failed') {
+          this.publishFailure(eventBus, taskId, contextId, event.error.message)
+          return
+        }
+        if (event.type === 'error') {
+          this.publishFailure(eventBus, taskId, contextId, event.message)
+          return
+        }
+        if (
+          event.type === 'item.started' ||
+          event.type === 'item.updated' ||
+          event.type === 'item.completed'
+        ) {
+          const item = event.item
+          const isCompleted = event.type === 'item.completed'
+
+          switch (item.type) {
+            case 'agent_message':
+            case 'reasoning': {
+              if (item.text) {
+                const prevLength = sentTextLengths.get(item.id) || 0
+                const deltaText = item.text.slice(prevLength)
+                if (deltaText.length > 0) {
+                  sentTextLengths.set(item.id, item.text.length)
+                  if (item.type === 'reasoning') {
+                    this.publishThought(eventBus, taskId, contextId, deltaText)
+                  } else {
+                    this.publishTextContent(eventBus, taskId, contextId, deltaText)
+                  }
                 }
               }
+              break
             }
-            break
-          }
-          case 'command_execution': {
-            const stateKey = `${item.id}:state`
-            const outputKey = `${item.id}:output`
-            const lastState = sentItemStates.get(stateKey)
+            case 'command_execution': {
+              const stateKey = `${item.id}:state`
+              const outputKey = `${item.id}:output`
+              const lastState = sentItemStates.get(stateKey)
 
-            if (!lastState) {
-              sentItemStates.set(stateKey, 'started')
-              this.publishToolUpdate(eventBus, taskId, contextId, {
-                request: { callId: item.id, name: 'command_execution' },
-                status: item.status,
-                command: item.command,
-              })
+              if (!lastState) {
+                sentItemStates.set(stateKey, 'started')
+                this.publishToolUpdate(eventBus, taskId, contextId, {
+                  request: { callId: item.id, name: 'command_execution' },
+                  status: item.status,
+                  command: item.command,
+                })
+              }
+
+              if (item.aggregated_output) {
+                const prevLength = sentTextLengths.get(outputKey) || 0
+                const deltaOutput = item.aggregated_output.slice(prevLength)
+                if (deltaOutput.length > 0) {
+                  sentTextLengths.set(outputKey, item.aggregated_output.length)
+                  this.publishToolOutput(
+                    eventBus,
+                    taskId,
+                    contextId,
+                    item.id,
+                    deltaOutput,
+                    true,
+                    isCompleted
+                  )
+                }
+              }
+
+              if (isCompleted && lastState !== 'completed') {
+                sentItemStates.set(stateKey, 'completed')
+                this.publishToolUpdate(eventBus, taskId, contextId, {
+                  request: { callId: item.id, name: 'command_execution' },
+                  status: item.status,
+                  command: item.command,
+                  exitCode: item.exit_code,
+                })
+              }
+              break
             }
-
-            if (item.aggregated_output) {
-              const prevLength = sentTextLengths.get(outputKey) || 0
-              const deltaOutput = item.aggregated_output.slice(prevLength)
-              if (deltaOutput.length > 0) {
-                sentTextLengths.set(outputKey, item.aggregated_output.length)
+            case 'file_change': {
+              if (isCompleted) {
                 this.publishToolOutput(
                   eventBus,
                   taskId,
                   contextId,
                   item.id,
-                  deltaOutput,
-                  true,
-                  isCompleted
+                  this.stringifyToolOutput({ changes: item.changes }),
+                  false,
+                  true
                 )
+                this.publishToolUpdate(eventBus, taskId, contextId, {
+                  request: { callId: item.id, name: 'file_change' },
+                  status: item.status,
+                  changes: item.changes,
+                })
               }
+              break
             }
+            case 'mcp_tool_call': {
+              const stateKey = `${item.id}:state`
+              const lastState = sentItemStates.get(stateKey)
 
-            if (isCompleted && lastState !== 'completed') {
-              sentItemStates.set(stateKey, 'completed')
-              this.publishToolUpdate(eventBus, taskId, contextId, {
-                request: { callId: item.id, name: 'command_execution' },
-                status: item.status,
-                command: item.command,
-                exitCode: item.exit_code,
-              })
+              if (!lastState) {
+                sentItemStates.set(stateKey, 'started')
+                this.publishToolUpdate(eventBus, taskId, contextId, {
+                  request: { callId: item.id, name: 'mcp_tool_call' },
+                  status: item.status,
+                  server: item.server,
+                  tool: item.tool,
+                  arguments: item.arguments,
+                })
+              }
+
+              if (isCompleted && lastState !== 'completed') {
+                sentItemStates.set(stateKey, 'completed')
+                if (item.error) {
+                  this.publishToolUpdate(eventBus, taskId, contextId, {
+                    request: { callId: item.id, name: 'mcp_tool_call' },
+                    status: 'failed',
+                    error: item.error,
+                  })
+                } else if (item.result) {
+                  this.publishToolOutput(
+                    eventBus,
+                    taskId,
+                    contextId,
+                    item.id,
+                    this.stringifyToolOutput(item.result),
+                    false,
+                    true
+                  )
+                  this.publishToolUpdate(eventBus, taskId, contextId, {
+                    request: { callId: item.id, name: 'mcp_tool_call' },
+                    status: 'completed',
+                    result: item.result,
+                    output: item.result,
+                  })
+                }
+              }
+              break
             }
-            break
-          }
-          case 'file_change': {
-            if (isCompleted) {
+            case 'web_search': {
+              this.publishToolUpdate(eventBus, taskId, contextId, {
+                request: { callId: item.id, name: 'web_search' },
+                status: 'completed',
+                query: item.query,
+              })
+              break
+            }
+            case 'todo_list': {
               this.publishToolOutput(
                 eventBus,
                 taskId,
                 contextId,
                 item.id,
-                this.stringifyToolOutput({ changes: item.changes }),
+                this.stringifyToolOutput({ items: item.items }),
                 false,
                 true
               )
               this.publishToolUpdate(eventBus, taskId, contextId, {
-                request: { callId: item.id, name: 'file_change' },
-                status: item.status,
-                changes: item.changes,
+                request: { callId: item.id, name: 'todo_list' },
+                status: 'updated',
+                items: item.items,
               })
+              break
             }
-            break
-          }
-          case 'mcp_tool_call': {
-            const stateKey = `${item.id}:state`
-            const lastState = sentItemStates.get(stateKey)
-
-            if (!lastState) {
-              sentItemStates.set(stateKey, 'started')
-              this.publishToolUpdate(eventBus, taskId, contextId, {
-                request: { callId: item.id, name: 'mcp_tool_call' },
-                status: item.status,
-                server: item.server,
-                tool: item.tool,
-                arguments: item.arguments,
-              })
+            case 'error': {
+              this.publishTextContent(eventBus, taskId, contextId, `Error: ${item.message}`)
+              break
             }
-
-            if (isCompleted && lastState !== 'completed') {
-              sentItemStates.set(stateKey, 'completed')
-              if (item.error) {
-                this.publishToolUpdate(eventBus, taskId, contextId, {
-                  request: { callId: item.id, name: 'mcp_tool_call' },
-                  status: 'failed',
-                  error: item.error,
-                })
-              } else if (item.result) {
-                this.publishToolOutput(
-                  eventBus,
-                  taskId,
-                  contextId,
-                  item.id,
-                  this.stringifyToolOutput(item.result),
-                  false,
-                  true
-                )
-                this.publishToolUpdate(eventBus, taskId, contextId, {
-                  request: { callId: item.id, name: 'mcp_tool_call' },
-                  status: 'completed',
-                  result: item.result,
-                  output: item.result,
-                })
-              }
+            default: {
+              break
             }
-            break
-          }
-          case 'web_search': {
-            this.publishToolUpdate(eventBus, taskId, contextId, {
-              request: { callId: item.id, name: 'web_search' },
-              status: 'completed',
-              query: item.query,
-            })
-            break
-          }
-          case 'todo_list': {
-            this.publishToolOutput(
-              eventBus,
-              taskId,
-              contextId,
-              item.id,
-              this.stringifyToolOutput({ items: item.items }),
-              false,
-              true
-            )
-            this.publishToolUpdate(eventBus, taskId, contextId, {
-              request: { callId: item.id, name: 'todo_list' },
-              status: 'updated',
-              items: item.items,
-            })
-            break
-          }
-          case 'error': {
-            this.publishTextContent(eventBus, taskId, contextId, `Error: ${item.message}`)
-            break
-          }
-          default: {
-            break
           }
         }
       }
-    }
 
-    this.publishStatus(eventBus, taskId, contextId, 'completed', true, undefined, 'state-change')
-    eventBus.finished()
+      this.publishStatus(eventBus, taskId, contextId, 'completed', true, undefined, 'state-change')
+      eventBus.finished()
+    } catch (error) {
+      if (abortController.signal.aborted) {
+        this.publishCanceled(eventBus, taskId, contextId)
+        return
+      }
+      const message = error instanceof Error ? error.message : String(error)
+      this.logger.error('[Codex A2A] Execution error:', message)
+      this.publishFailure(eventBus, taskId, contextId, message)
+    } finally {
+      this.abortControllers.delete(taskId)
+    }
   }
 
   async cancelTask(taskId: string, eventBus: ExecutionEventBus): Promise<void> {
-    this.canceledTasks.add(taskId)
+    const controller = this.abortControllers.get(taskId)
+    if (controller) {
+      controller.abort()
+    }
     const contextId = this.taskContexts.get(taskId)
     this.publishCanceled(eventBus, taskId, contextId)
     eventBus.finished()
+  }
+
+  /** Remove all cached threads. */
+  clearThreads(): void {
+    this.threads.clear()
+    this.threadWorkingDirs.clear()
+    this.threadLastUsed.clear()
+  }
+
+  private evictThreadsIfNeeded(): void {
+    while (this.threads.size >= this.maxThreads) {
+      let oldestKey: string | undefined
+      let oldestTime = Infinity
+      for (const [key, time] of this.threadLastUsed) {
+        if (time < oldestTime) {
+          oldestTime = time
+          oldestKey = key
+        }
+      }
+      if (!oldestKey) break
+      this.threads.delete(oldestKey)
+      this.threadWorkingDirs.delete(oldestKey)
+      this.threadLastUsed.delete(oldestKey)
+    }
   }
 
   private resolveThreadOptions(contextId: string): ThreadOptions {
@@ -470,7 +530,7 @@ export class CodexExecutor implements AgentExecutor {
       message,
       'state-change'
     )
-    this.canceledTasks.delete(taskId)
+    this.abortControllers.delete(taskId)
     this.taskContexts.delete(taskId)
   }
 }
