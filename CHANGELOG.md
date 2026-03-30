@@ -1,5 +1,17 @@
 # codex-a2a
 
+## 0.3.1
+
+### Patch Changes
+
+- ade51ff: update readme
+
+  - Add CI and npm badges
+  - Document new configuration options (CORS, maxThreads, shutdownTimeout)
+  - Add thread.started and error to event mapping table
+  - Switch script examples from npm to pnpm
+  - Add license section
+
 ## 0.3.0
 
 ### Minor Changes
