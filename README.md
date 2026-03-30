@@ -1,5 +1,8 @@
 # codex-a2a
 
+[![CI](https://github.com/MyPrototypeWhat/codex-a2a/actions/workflows/ci.yml/badge.svg)](https://github.com/MyPrototypeWhat/codex-a2a/actions/workflows/ci.yml)
+[![npm](https://img.shields.io/npm/v/codex-a2a)](https://www.npmjs.com/package/codex-a2a)
+
 Expose OpenAI Codex as an A2A server with a thin, configurable wrapper.
 
 ## Install
@@ -35,7 +38,10 @@ console.log('A2A server running at', server.getUrl())
 - Streaming updates for Codex events (messages, tools, file changes)
 - Per-context configuration hooks
 - Optional agent card overrides
-- Type-safe config helpers
+- Configurable CORS policy
+- Graceful shutdown with connection draining
+- Thread cache with LRU eviction
+- Task cancellation via AbortController
 
 ## Customizing the agent card
 
@@ -95,6 +101,38 @@ const server = new CodexA2AServer({
 
 `getTurnOptions(contextId)` lets you override per-turn options for `runStreamed`, such as `outputSchema` or `signal`.
 
+### CORS
+
+By default, the server allows all origins. You can restrict it:
+
+```ts
+const server = new CodexA2AServer({
+  cors: {
+    origin: 'https://example.com',
+    methods: ['GET', 'POST'],
+    headers: ['Content-Type'],
+  },
+})
+```
+
+### Thread cache
+
+Threads are cached per context. Set `maxThreads` to control the cache size (default 64). The least-recently-used thread is evicted when the limit is reached.
+
+```ts
+const server = new CodexA2AServer({
+  maxThreads: 32,
+})
+```
+
+### Graceful shutdown
+
+`stop()` waits for active connections to drain before closing. Set `shutdownTimeout` to control the max wait time in milliseconds (default 5000).
+
+```ts
+await server.stop()
+```
+
 ## API
 
 ```ts
@@ -110,6 +148,7 @@ server.cancelTask(taskId)
 
 When connected to the A2A server, the following Codex items are surfaced as A2A updates:
 
+- `thread.started` -> `status-update`
 - `agent_message` -> `status-update` (text message)
 - `reasoning` -> `status-update` (thought payload)
 - `command_execution` -> `status-update` + `artifact-update` (stdout/stderr)
@@ -117,11 +156,17 @@ When connected to the A2A server, the following Codex items are surfaced as A2A 
 - `file_change` -> `status-update` + `artifact-update` (changes list)
 - `todo_list` -> `status-update` + `artifact-update` (todo items)
 - `web_search` -> `status-update`
+- `error` -> `status-update` (failure)
 
 ## Scripts
 
 ```bash
-npm run build
-npm run test
-npm run typecheck
+pnpm run build
+pnpm run test
+pnpm run typecheck
+pnpm changeset       # create a changeset before submitting a PR
 ```
+
+## License
+
+[MIT](LICENSE)
