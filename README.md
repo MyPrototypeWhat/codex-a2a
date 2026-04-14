@@ -167,6 +167,10 @@ pnpm run typecheck
 pnpm changeset       # create a changeset before submitting a PR
 ```
 
+## Related Projects
+
+- [codex-a2a (Python)](https://github.com/liujuanjuan1984/codex-a2a) — A production-grade, standalone Python implementation with SQLite persistence, built-in auth, interrupt callbacks, and outbound A2A client support. Great for service-oriented deployments and agent networks.
+
 ## License
 
 [MIT](LICENSE)
