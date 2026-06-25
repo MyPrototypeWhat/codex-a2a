@@ -8,6 +8,7 @@ type ThreadLike = Pick<Thread, 'runStreamed'>
 
 type CodexLike = {
   startThread: (options?: ThreadOptions) => ThreadLike
+  resumeThread?: (id: string, options?: ThreadOptions) => ThreadLike
 }
 
 export interface CodexExecutorOptions {
@@ -26,6 +27,7 @@ export class CodexExecutor implements AgentExecutor {
   private threadLastUsed = new Map<string, number>()
   private abortControllers = new Map<string, AbortController>()
   private taskContexts = new Map<string, string>()
+  private contextThreadIds = new Map<string, string>()
   private codex: CodexLike
   private maxThreads: number
   private getThreadOptions: (contextId: string) => Partial<ThreadOptions>
@@ -90,6 +92,15 @@ export class CodexExecutor implements AgentExecutor {
       const existingThreadKey = `${contextId}:${currentWorkingDir}`
       const cachedThreadKey = this.threadWorkingDirs.get(contextId)
 
+      const knownThreadId = this.contextThreadIds.get(contextId)
+      const inboundThreadId = this.readInboundThreadId(userMessage)
+      // Client explicitly asked to bind this context to a different thread → resume it.
+      if (inboundThreadId && inboundThreadId !== knownThreadId && thread) {
+        this.threads.delete(contextId)
+        thread = undefined
+      }
+      const resumeId = inboundThreadId ?? knownThreadId
+
       if (thread && cachedThreadKey !== existingThreadKey) {
         this.threads.delete(contextId)
         thread = undefined
@@ -104,15 +115,25 @@ export class CodexExecutor implements AgentExecutor {
           workingDirectory: workingDir || undefined,
         }
 
-        thread = this.codex.startThread(resolvedThreadOptions)
+        if (resumeId && this.codex.resumeThread) {
+          thread = this.codex.resumeThread(resumeId, resolvedThreadOptions)
+          this.contextThreadIds.set(contextId, resumeId)
+          this.logger.log('[Codex A2A] Thread resumed with config:', {
+            threadId: resumeId,
+            workingDirectory: workingDir || process.cwd(),
+            sandboxMode: resolvedThreadOptions.sandboxMode,
+          })
+        } else {
+          thread = this.codex.startThread(resolvedThreadOptions)
+          this.logger.log('[Codex A2A] Thread started with config:', {
+            workingDirectory: workingDir || process.cwd(),
+            webSearchEnabled: resolvedThreadOptions.webSearchEnabled,
+            networkAccess: resolvedThreadOptions.networkAccessEnabled,
+            sandboxMode: resolvedThreadOptions.sandboxMode,
+          })
+        }
         this.threads.set(contextId, thread)
         this.threadWorkingDirs.set(contextId, existingThreadKey)
-        this.logger.log('[Codex A2A] Thread started with config:', {
-          workingDirectory: workingDir || process.cwd(),
-          webSearchEnabled: resolvedThreadOptions.webSearchEnabled,
-          networkAccess: resolvedThreadOptions.networkAccessEnabled,
-          sandboxMode: resolvedThreadOptions.sandboxMode,
-        })
       }
 
       this.threadLastUsed.set(contextId, Date.now())
@@ -135,7 +156,8 @@ export class CodexExecutor implements AgentExecutor {
         this.logger.log('[Codex A2A] event', event)
 
         if (event.type === 'thread.started') {
-          this.publishStatus(eventBus, taskId, contextId, 'working', false, undefined, 'thread-started')
+          if (event.thread_id) this.contextThreadIds.set(contextId, event.thread_id)
+          this.publishThreadStarted(eventBus, taskId, contextId, event.thread_id)
           continue
         }
         if (event.type === 'turn.started') {
@@ -394,6 +416,36 @@ export class CodexExecutor implements AgentExecutor {
     if (!workingDirectory) return undefined
     const trimmed = workingDirectory.trim()
     return trimmed.length > 0 ? trimmed : undefined
+  }
+
+  private readInboundThreadId(message: Message): string | undefined {
+    const meta = message.metadata
+    if (!meta) return undefined
+    const codexAgent = meta.codexAgent as { threadId?: unknown } | undefined
+    const fromAgent = codexAgent?.threadId
+    const raw = typeof fromAgent === 'string' ? fromAgent : meta.codexThreadId
+    return typeof raw === 'string' && raw.length > 0 ? raw : undefined
+  }
+
+  private publishThreadStarted(
+    eventBus: ExecutionEventBus,
+    taskId: string,
+    contextId: string,
+    threadId?: string
+  ) {
+    eventBus.publish({
+      kind: 'status-update',
+      taskId,
+      contextId,
+      status: {
+        state: 'working',
+        timestamp: new Date().toISOString(),
+      },
+      final: false,
+      metadata: {
+        codexAgent: { kind: 'thread-started', ...(threadId ? { threadId } : {}) },
+      },
+    } satisfies TaskStatusUpdateEvent)
   }
 
   private publishStatus(

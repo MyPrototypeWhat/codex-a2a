@@ -594,4 +594,123 @@ describe('CodexExecutor', () => {
     expect(hasFailed).toBe(true)
     expect(bus.finished).toBe(true)
   })
+
+  it('surfaces thread_id in status metadata', async () => {
+    const events: ThreadEvent[] = [
+      { type: 'thread.started', thread_id: 't1' } as ThreadEvent,
+      { type: 'turn.completed', usage: { input_tokens: 1, cached_input_tokens: 0, output_tokens: 1 } },
+    ]
+    const codex = {
+      startThread: () => ({
+        runStreamed: async () => ({
+          events: (async function* () {
+            for (const e of events) yield e
+          })(),
+        }),
+      }),
+    }
+    const executor = new CodexExecutor({ codex, logger: createSilentLogger() })
+    const { eventBus, published } = createEventBus()
+
+    await executor.execute(reqCtx('task-tid', 'ctx-tid', 'hi'), eventBus)
+
+    const surfaced = published.some(
+      (e) =>
+        isStatusUpdateEvent(e) &&
+        isRecord(e.metadata) &&
+        isRecord(e.metadata.codexAgent) &&
+        e.metadata.codexAgent.threadId === 't1',
+    )
+    expect(surfaced).toBe(true)
+  })
+
+  it('resumes a thread after the live cache is cleared', async () => {
+    const startThread = vi.fn(() => ({
+      runStreamed: async () => ({
+        events: (async function* () {
+          yield { type: 'thread.started', thread_id: 't1' } as ThreadEvent
+          yield {
+            type: 'turn.completed',
+            usage: { input_tokens: 1, cached_input_tokens: 0, output_tokens: 1 },
+          } as ThreadEvent
+        })(),
+      }),
+    }))
+    const resumeThread = vi.fn(() => ({
+      runStreamed: async () => ({ events: (async function* () {})() }),
+    }))
+    const codex = { startThread, resumeThread }
+    const executor = new CodexExecutor({ codex, logger: createSilentLogger() })
+
+    await executor.execute(reqCtx('task-r1', 'ctx-r', 'first'), createEventBus().eventBus)
+    expect(startThread).toHaveBeenCalledTimes(1)
+
+    executor.clearThreads() // drops the live thread but keeps the thread-id map
+
+    await executor.execute(reqCtx('task-r2', 'ctx-r', 'second'), createEventBus().eventBus)
+    expect(resumeThread).toHaveBeenCalledTimes(1)
+    expect(resumeThread).toHaveBeenCalledWith('t1', expect.anything())
+  })
+
+  it('resumes a thread from inbound metadata.codexAgent.threadId', async () => {
+    const startThread = vi.fn(() => ({ runStreamed: async () => ({ events: (async function* () {})() }) }))
+    const resumeThread = vi.fn(() => ({ runStreamed: async () => ({ events: (async function* () {})() }) }))
+    const codex = { startThread, resumeThread }
+    const executor = new CodexExecutor({ codex, logger: createSilentLogger() })
+    const message: Message = {
+      kind: 'message',
+      role: 'user',
+      messageId: 'm',
+      taskId: 'task-im',
+      contextId: 'ctx-im',
+      parts: [{ kind: 'text', text: 'hi' }],
+      metadata: { codexAgent: { threadId: 'abc' } },
+    }
+
+    await executor.execute({ taskId: 'task-im', contextId: 'ctx-im', userMessage: message }, createEventBus().eventBus)
+
+    expect(resumeThread).toHaveBeenCalledWith('abc', expect.anything())
+    expect(startThread).not.toHaveBeenCalled()
+  })
+
+  it('resumes from the legacy metadata.codexThreadId key', async () => {
+    const resumeThread = vi.fn(() => ({ runStreamed: async () => ({ events: (async function* () {})() }) }))
+    const codex = {
+      startThread: vi.fn(() => ({ runStreamed: async () => ({ events: (async function* () {})() }) })),
+      resumeThread,
+    }
+    const executor = new CodexExecutor({ codex, logger: createSilentLogger() })
+    const message: Message = {
+      kind: 'message',
+      role: 'user',
+      messageId: 'm',
+      taskId: 'task-lg',
+      contextId: 'ctx-lg',
+      parts: [{ kind: 'text', text: 'hi' }],
+      metadata: { codexThreadId: 'abc' },
+    }
+
+    await executor.execute({ taskId: 'task-lg', contextId: 'ctx-lg', userMessage: message }, createEventBus().eventBus)
+
+    expect(resumeThread).toHaveBeenCalledWith('abc', expect.anything())
+  })
+
+  it('falls back to startThread when resumeThread is unavailable', async () => {
+    const startThread = vi.fn(() => ({ runStreamed: async () => ({ events: (async function* () {})() }) }))
+    const codex = { startThread } // no resumeThread
+    const executor = new CodexExecutor({ codex, logger: createSilentLogger() })
+    const message: Message = {
+      kind: 'message',
+      role: 'user',
+      messageId: 'm',
+      taskId: 'task-nf',
+      contextId: 'ctx-nf',
+      parts: [{ kind: 'text', text: 'hi' }],
+      metadata: { codexAgent: { threadId: 'abc' } },
+    }
+
+    await executor.execute({ taskId: 'task-nf', contextId: 'ctx-nf', userMessage: message }, createEventBus().eventBus)
+
+    expect(startThread).toHaveBeenCalledTimes(1)
+  })
 })
