@@ -65,22 +65,26 @@ export class CodexExecutor implements AgentExecutor {
     const workingDir = workingDirOverride || this.normalizeWorkingDirectory(threadOptions.workingDirectory)
     const currentWorkingDir = workingDir || process.cwd()
 
-    const { input, hasContent, cleanup } = await buildCodexInput(userMessage, {
-      workingDirectory: currentWorkingDir,
-      additionalDirectories: threadOptions.additionalDirectories,
-      logger: this.logger,
-    })
-
-    if (!hasContent) {
-      await cleanup()
-      this.publishFailure(eventBus, taskId, contextId, 'No text or image content')
-      return
-    }
-
     const abortController = new AbortController()
     this.abortControllers.set(taskId, abortController)
 
+    // Default no-op so finally can always call cleanup, even if buildCodexInput throws.
+    let cleanup: () => Promise<void> = async () => {}
+
     try {
+      const built = await buildCodexInput(userMessage, {
+        workingDirectory: currentWorkingDir,
+        additionalDirectories: threadOptions.additionalDirectories,
+        logger: this.logger,
+      })
+      cleanup = built.cleanup
+      const { input, hasContent } = built
+
+      if (!hasContent) {
+        this.publishFailure(eventBus, taskId, contextId, 'No text or image content')
+        return
+      }
+
       let thread = this.threads.get(contextId)
 
       const existingThreadKey = `${contextId}:${currentWorkingDir}`
