@@ -6,6 +6,7 @@ import { agentCardHandler, jsonRpcHandler, restHandler, UserBuilder } from '@a2a
 import type { Codex } from '@openai/codex-sdk'
 import express, { type Express } from 'express'
 import { CodexExecutor } from './codex-executor'
+import { SUPPORTED_IMAGE_MIME_TYPES } from './config'
 import type { ThreadOptions, TurnOptions } from '@openai/codex-sdk'
 
 export interface CorsOptions {
@@ -225,7 +226,7 @@ export class CodexA2AServer extends EventEmitter {
         stateTransitionHistory: false,
       },
       supportsAuthenticatedExtendedCard: false,
-      defaultInputModes: ['text/plain'],
+      defaultInputModes: ['text/plain', ...SUPPORTED_IMAGE_MIME_TYPES],
       defaultOutputModes: ['text/plain'],
       additionalInterfaces: [
         { url: `http://localhost:${port}/a2a/jsonrpc`, transport: 'JSONRPC' },

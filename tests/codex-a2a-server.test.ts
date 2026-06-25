@@ -95,6 +95,23 @@ describe('CodexA2AServer', () => {
     expect(card.protocolVersion).toBe('0.3.0')
   })
 
+  it('declares image input modes in the agent card', async () => {
+    server = new CodexA2AServer({
+      codex: createMockCodex() as any,
+      logger: { log: () => {}, error: () => {} },
+    })
+
+    await server.start()
+
+    const url = server.getUrl()!
+    const response = await fetch(`${url}/.well-known/agent-card.json`)
+    const card = await response.json()
+
+    expect(card.defaultInputModes).toContain('text/plain')
+    expect(card.defaultInputModes).toContain('image/png')
+    expect(card.defaultInputModes).toContain('image/jpeg')
+  })
+
   it('applies custom CORS origin', async () => {
     server = new CodexA2AServer({
       codex: createMockCodex() as any,
