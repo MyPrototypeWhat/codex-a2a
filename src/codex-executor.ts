@@ -381,9 +381,11 @@ export class CodexExecutor implements AgentExecutor {
 
   async cancelTask(taskId: string, eventBus: ExecutionEventBus): Promise<void> {
     const controller = this.abortControllers.get(taskId)
-    if (controller) {
-      controller.abort()
+    if (!controller) {
+      // Task is not in flight (already finished or never started) — nothing to cancel.
+      return
     }
+    controller.abort()
     const contextId = this.taskContexts.get(taskId)
     this.publishCanceled(eventBus, taskId, contextId)
     eventBus.finished()

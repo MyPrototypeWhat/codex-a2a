@@ -98,7 +98,12 @@ export async function buildCodexInput(
     const uri = file.uri
     let localPath: string | undefined
     if (uri.startsWith('file://')) {
-      localPath = fileURLToPath(uri)
+      try {
+        localPath = fileURLToPath(uri)
+      } catch (error) {
+        logger?.error('[Codex A2A] Skipping malformed file:// image URI', { uri, error })
+        continue
+      }
     } else if (uri.startsWith('/')) {
       localPath = uri
     } else {

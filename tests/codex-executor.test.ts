@@ -324,19 +324,29 @@ describe('CodexExecutor', () => {
     expect(lastStatus).toBeGreaterThan(firstArtifact)
   })
 
-  it('cancels a task via AbortController', async () => {
+  it('cancels an in-flight task via AbortController', async () => {
     let abortSignal: AbortSignal | undefined
+    let parked!: () => void
+    const parkedPromise = new Promise<void>((resolve) => {
+      parked = resolve
+    })
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+
     const thread = {
-      runStreamed: async (_text: string, options?: { signal?: AbortSignal }) => {
+      runStreamed: async (_input: unknown, options?: { signal?: AbortSignal }) => {
         abortSignal = options?.signal
         return {
           events: (async function* () {
             yield { type: 'turn.started' } as ThreadEvent
+            parked() // signal that execute() is now parked mid-stream
+            await gate
             yield {
               type: 'item.completed',
-              item: { id: 'msg-1', type: 'agent_message', text: 'Before cancel' },
+              item: { id: 'msg-1', type: 'agent_message', text: 'after cancel' },
             } as ThreadEvent
-            yield { type: 'turn.completed', usage: { input_tokens: 1, cached_input_tokens: 0, output_tokens: 1 } } as ThreadEvent
           })(),
         }
       },
@@ -344,29 +354,48 @@ describe('CodexExecutor', () => {
 
     const codex = { startThread: () => thread }
     const executor = new CodexExecutor({ codex, logger: createSilentLogger() })
+    const bus = createEventBus()
 
-    const bus1 = createEventBus()
-    const requestContext: RequestContext = {
-      taskId: 'task-cancel',
-      contextId: 'ctx-cancel',
-      userMessage: createMessage('task-cancel', 'ctx-cancel', 'Do something'),
-    }
+    const execPromise = executor.execute(reqCtx('task-cancel', 'ctx-cancel', 'go'), bus.eventBus)
+    await parkedPromise // controller is registered and we're parked mid-stream
 
-    // Execute first to register the abort controller
-    await executor.execute(requestContext, bus1.eventBus)
+    await executor.cancelTask('task-cancel', bus.eventBus)
+    expect(abortSignal?.aborted).toBe(true)
 
-    // Verify signal was passed to runStreamed
-    expect(abortSignal).toBeDefined()
+    release()
+    await execPromise
 
-    // Now test cancelTask publishes canceled status
-    const bus2 = createEventBus()
-    await executor.cancelTask('task-cancel', bus2.eventBus)
-
-    const hasCanceled = bus2.published.some(
+    const hasCanceled = bus.published.some(
       (event) => isStatusUpdateEvent(event) && event.status?.state === 'canceled'
     )
     expect(hasCanceled).toBe(true)
-    expect(bus2.finished).toBe(true)
+  })
+
+  it('does not cancel a task that already finished', async () => {
+    const codex = {
+      startThread: () => ({
+        runStreamed: async () => ({
+          events: (async function* () {
+            yield {
+              type: 'turn.completed',
+              usage: { input_tokens: 1, cached_input_tokens: 0, output_tokens: 1 },
+            } as ThreadEvent
+          })(),
+        }),
+      }),
+    }
+    const executor = new CodexExecutor({ codex, logger: createSilentLogger() })
+    await executor.execute(reqCtx('task-done', 'ctx-done', 'hi'), createEventBus().eventBus)
+
+    const bus = createEventBus()
+    await executor.cancelTask('task-done', bus.eventBus)
+
+    // Already completed → cancel is a no-op, no spurious canceled/final event.
+    const hasCanceled = bus.published.some(
+      (event) => isStatusUpdateEvent(event) && event.status?.state === 'canceled'
+    )
+    expect(hasCanceled).toBe(false)
+    expect(bus.finished).toBe(false)
   })
 
   it('handles runStreamed throwing an exception', async () => {

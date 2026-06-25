@@ -149,4 +149,32 @@ describe('buildCodexInput', () => {
     expect(r.input).toBe('hi')
     await r.cleanup()
   })
+
+  it('skips a malformed file:// image URI instead of throwing', async () => {
+    const r = await buildCodexInput(
+      msg([
+        { kind: 'text', text: 'hi' },
+        // Non-localhost host → fileURLToPath throws; must be caught and skipped.
+        { kind: 'file', file: { uri: 'file://remotehost/x.png', mimeType: 'image/png' } },
+      ]),
+      { workingDirectory: process.cwd(), logger: silent },
+    )
+    expect(typeof r.input).toBe('string')
+    expect(r.input).toBe('hi')
+    await r.cleanup()
+  })
+
+  it('still cleans up earlier temp files when a later file URI is malformed', async () => {
+    const r = await buildCodexInput(
+      msg([
+        { kind: 'file', file: { bytes: PNG_B64, mimeType: 'image/png', name: 'a.png' } },
+        { kind: 'file', file: { uri: 'file://remotehost/x.png', mimeType: 'image/png' } },
+      ]),
+      { workingDirectory: process.cwd(), logger: silent },
+    )
+    const img = (r.input as ImgPart[]).find((i) => i.type === 'local_image')!
+    expect(existsSync(img.path!)).toBe(true)
+    await r.cleanup()
+    expect(existsSync(img.path!)).toBe(false)
+  })
 })
