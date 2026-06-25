@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { CodexExecutor } from '../src/codex-executor'
 import type { ThreadEvent } from '@openai/codex-sdk'
 import type { ExecutionEventBus, RequestContext } from '@a2a-js/sdk/server'
@@ -64,6 +64,10 @@ function createMessage(taskId: string, contextId: string, text: string): Message
 
 function createSilentLogger() {
   return { log: () => {}, error: () => {} }
+}
+
+function reqCtx(taskId: string, contextId: string, text: string): RequestContext {
+  return { taskId, contextId, userMessage: createMessage(taskId, contextId, text) }
 }
 
 describe('CodexExecutor', () => {
@@ -522,6 +526,40 @@ describe('CodexExecutor', () => {
     await executor.execute(requestContext, eventBus)
 
     executor.clearThreads()
+  })
+
+  it('passes image input to runStreamed as a UserInput array', async () => {
+    let captured: unknown
+    const codex = {
+      startThread: () => ({
+        runStreamed: async (input: unknown) => {
+          captured = input
+          return { events: (async function* () {})() }
+        },
+      }),
+    }
+    const executor = new CodexExecutor({ codex, logger: createSilentLogger() })
+    const png = Buffer.from('89504e470d0a1a0a', 'hex').toString('base64')
+    const message: Message = {
+      kind: 'message',
+      role: 'user',
+      messageId: 'm',
+      taskId: 'task-img',
+      contextId: 'ctx-img',
+      parts: [
+        { kind: 'text', text: 'describe' },
+        { kind: 'file', file: { bytes: png, mimeType: 'image/png', name: 'x.png' } },
+      ],
+    }
+    const { eventBus } = createEventBus()
+
+    await executor.execute(
+      { taskId: 'task-img', contextId: 'ctx-img', userMessage: message },
+      eventBus,
+    )
+
+    expect(Array.isArray(captured)).toBe(true)
+    expect((captured as Array<{ type: string }>).some((i) => i.type === 'local_image')).toBe(true)
   })
 
   it('publishes failure for empty text message', async () => {

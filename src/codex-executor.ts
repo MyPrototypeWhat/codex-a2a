@@ -2,6 +2,7 @@ import type { Message, Task, TaskStatusUpdateEvent } from '@a2a-js/sdk'
 import type { AgentExecutor, ExecutionEventBus, RequestContext } from '@a2a-js/sdk/server'
 import type { Codex, Thread, ThreadOptions, TurnOptions } from '@openai/codex-sdk'
 import { DEFAULT_THREAD_OPTIONS } from './config'
+import { buildCodexInput } from './codex-input'
 
 type ThreadLike = Pick<Thread, 'runStreamed'>
 
@@ -59,13 +60,20 @@ export class CodexExecutor implements AgentExecutor {
 
     this.publishStatus(eventBus, taskId, contextId, 'working', false, undefined, 'state-change')
 
-    const text = userMessage.parts
-      .filter((part): part is { kind: 'text'; text: string } => part.kind === 'text')
-      .map((part) => part.text)
-      .join('\n')
+    const threadOptions = this.resolveThreadOptions(contextId)
+    const workingDirOverride = this.getWorkingDirectory?.(contextId)
+    const workingDir = workingDirOverride || this.normalizeWorkingDirectory(threadOptions.workingDirectory)
+    const currentWorkingDir = workingDir || process.cwd()
 
-    if (!text) {
-      this.publishFailure(eventBus, taskId, contextId, 'No text content')
+    const { input, hasContent, cleanup } = await buildCodexInput(userMessage, {
+      workingDirectory: currentWorkingDir,
+      additionalDirectories: threadOptions.additionalDirectories,
+      logger: this.logger,
+    })
+
+    if (!hasContent) {
+      await cleanup()
+      this.publishFailure(eventBus, taskId, contextId, 'No text or image content')
       return
     }
 
@@ -75,11 +83,6 @@ export class CodexExecutor implements AgentExecutor {
     try {
       let thread = this.threads.get(contextId)
 
-      const threadOptions = this.resolveThreadOptions(contextId)
-      const workingDirOverride = this.getWorkingDirectory?.(contextId)
-      const workingDir = workingDirOverride || this.normalizeWorkingDirectory(threadOptions.workingDirectory)
-
-      const currentWorkingDir = workingDir || process.cwd()
       const existingThreadKey = `${contextId}:${currentWorkingDir}`
       const cachedThreadKey = this.threadWorkingDirs.get(contextId)
 
@@ -116,7 +119,7 @@ export class CodexExecutor implements AgentExecutor {
         signal: abortController.signal,
       }
 
-      const { events } = await thread.runStreamed(text, mergedTurnOptions)
+      const { events } = await thread.runStreamed(input, mergedTurnOptions)
       const sentTextLengths = new Map<string, number>()
       const sentItemStates = new Map<string, string>()
 
@@ -341,6 +344,7 @@ export class CodexExecutor implements AgentExecutor {
       this.publishFailure(eventBus, taskId, contextId, message)
     } finally {
       this.abortControllers.delete(taskId)
+      await cleanup()
     }
   }
 
