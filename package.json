@@ -41,7 +41,7 @@
   },
   "dependencies": {
     "@a2a-js/sdk": "^0.3.13",
-    "@openai/codex-sdk": "^0.116.0",
+    "@openai/codex-sdk": "^0.142.1",
     "express": "^4.19.2"
   },
   "devDependencies": {
