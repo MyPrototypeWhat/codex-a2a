@@ -750,4 +750,26 @@ describe('CodexExecutor', () => {
     expect(resumeThread).toHaveBeenCalledWith('t2', expect.anything())
     expect(startThread).toHaveBeenCalledTimes(1) // live thread redirected, not recreated
   })
+
+  it('does not leak taskContexts entries after a task completes', async () => {
+    const codex = {
+      startThread: () => ({
+        runStreamed: async () => ({
+          events: (async function* () {
+            yield {
+              type: 'turn.completed',
+              usage: { input_tokens: 1, cached_input_tokens: 0, output_tokens: 1 },
+            } as ThreadEvent
+          })(),
+        }),
+      }),
+    }
+    const executor = new CodexExecutor({ codex, logger: createSilentLogger() })
+    const { eventBus } = createEventBus()
+
+    await executor.execute(reqCtx('task-leak', 'ctx-leak', 'hi'), eventBus)
+
+    const taskContexts = (executor as unknown as { taskContexts: Map<string, string> }).taskContexts
+    expect(taskContexts.has('task-leak')).toBe(false)
+  })
 })

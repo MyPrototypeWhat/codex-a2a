@@ -374,6 +374,7 @@ export class CodexExecutor implements AgentExecutor {
       this.publishFailure(eventBus, taskId, contextId, message)
     } finally {
       this.abortControllers.delete(taskId)
+      this.taskContexts.delete(taskId)
       await cleanup()
     }
   }
