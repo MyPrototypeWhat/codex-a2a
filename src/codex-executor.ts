@@ -3,6 +3,7 @@ import type { AgentExecutor, ExecutionEventBus, RequestContext } from '@a2a-js/s
 import type { Codex, Thread, ThreadOptions, TurnOptions } from '@openai/codex-sdk'
 import { DEFAULT_THREAD_OPTIONS } from './config'
 import { buildCodexInput } from './codex-input'
+import { type CodexAgentEventKind, readThreadId } from './metadata'
 
 type ThreadLike = Pick<Thread, 'runStreamed'>
 
@@ -15,6 +16,10 @@ export interface CodexExecutorOptions {
   codex: CodexLike
   getThreadOptions?: (contextId: string) => Partial<ThreadOptions>
   getTurnOptions?: (contextId: string) => TurnOptions | undefined
+  /**
+   * @deprecated Use `getThreadOptions(contextId).workingDirectory` instead. When both are set,
+   * this takes precedence. Kept for backward compatibility; prefer the single `getThreadOptions` knob.
+   */
   getWorkingDirectory?: (contextId: string) => string | undefined
   /** Maximum number of cached threads before eviction (default: 64) */
   maxThreads?: number
@@ -95,7 +100,7 @@ export class CodexExecutor implements AgentExecutor {
       const cachedThreadKey = this.threadWorkingDirs.get(contextId)
 
       const knownThreadId = this.contextThreadIds.get(contextId)
-      const inboundThreadId = this.readInboundThreadId(userMessage)
+      const inboundThreadId = readThreadId(userMessage)
       // Client explicitly asked to bind this context to a different thread → resume it.
       if (inboundThreadId && inboundThreadId !== knownThreadId && thread) {
         this.threads.delete(contextId)
@@ -425,15 +430,6 @@ export class CodexExecutor implements AgentExecutor {
     return trimmed.length > 0 ? trimmed : undefined
   }
 
-  private readInboundThreadId(message: Message): string | undefined {
-    const meta = message.metadata
-    if (!meta) return undefined
-    const codexAgent = meta.codexAgent as { threadId?: unknown } | undefined
-    const fromAgent = codexAgent?.threadId
-    const raw = typeof fromAgent === 'string' ? fromAgent : meta.codexThreadId
-    return typeof raw === 'string' && raw.length > 0 ? raw : undefined
-  }
-
   private publishThreadStarted(
     eventBus: ExecutionEventBus,
     taskId: string,
@@ -462,7 +458,7 @@ export class CodexExecutor implements AgentExecutor {
     state: TaskStatusUpdateEvent['status']['state'],
     final = false,
     message?: Message,
-    codexAgentKind?: string
+    codexAgentKind?: CodexAgentEventKind
   ) {
     eventBus.publish({
       kind: 'status-update',

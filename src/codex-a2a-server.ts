@@ -22,6 +22,10 @@ export interface CodexA2AServerOptions {
   codexFactory?: () => Codex | Promise<Codex>
   getThreadOptions?: (contextId: string) => Partial<ThreadOptions>
   getTurnOptions?: (contextId: string) => TurnOptions | undefined
+  /**
+   * @deprecated Use `getThreadOptions(contextId).workingDirectory` instead. When both are set,
+   * this takes precedence. Kept for backward compatibility; prefer the single `getThreadOptions` knob.
+   */
   getWorkingDirectory?: (contextId: string) => string | undefined
   /** Maximum cached threads before LRU eviction (default: 64) */
   maxThreads?: number

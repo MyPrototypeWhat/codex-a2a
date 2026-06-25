@@ -136,21 +136,32 @@ await server.stop()
 ### Resuming threads
 
 Each context's Codex thread is cached in memory and survives LRU eviction. To resume
-a thread across a server restart, capture the id the server surfaces on `thread.started`
-(`status-update.metadata.codexAgent.threadId`) and send it back on a later message:
+a thread across a server restart, capture the id the server surfaces on the `thread-started`
+status-update and send it back on a later message. Exported types and helpers keep you off
+the raw metadata keys:
 
 ```ts
+import { threadIdMetadata, type CodexAgentMetadata } from 'codex-a2a'
+
+// Client side — read the id the server surfaced on a status-update:
+const codexAgent = statusUpdate.metadata?.codexAgent as CodexAgentMetadata | undefined
+if (codexAgent?.kind === 'thread-started' && codexAgent.threadId) {
+  savedThreadId = codexAgent.threadId
+}
+
+// Client side — bind a later message to that thread to resume it:
 const message = {
   kind: 'message',
   role: 'user',
   messageId: crypto.randomUUID(),
   parts: [{ kind: 'text', text: 'continue' }],
-  metadata: { codexAgent: { threadId: savedThreadId } },
+  metadata: threadIdMetadata(savedThreadId),
 }
 ```
 
-The legacy key `metadata.codexThreadId` is also accepted. Resumed sessions are read
-from `~/.codex/sessions`.
+`CodexAgentEventKind` types the `metadata.codexAgent.kind` discriminator on every status-update.
+On the server side, `readThreadId(message)` is the inbound counterpart (it also accepts the
+legacy `metadata.codexThreadId` key). Resumed sessions are read from `~/.codex/sessions`.
 
 ### Image input
 
