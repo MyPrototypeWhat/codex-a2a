@@ -650,6 +650,7 @@ describe('CodexExecutor', () => {
     await executor.execute(reqCtx('task-r2', 'ctx-r', 'second'), createEventBus().eventBus)
     expect(resumeThread).toHaveBeenCalledTimes(1)
     expect(resumeThread).toHaveBeenCalledWith('t1', expect.anything())
+    expect(startThread).toHaveBeenCalledTimes(1) // not re-created on the second execute
   })
 
   it('resumes a thread from inbound metadata.codexAgent.threadId', async () => {
@@ -712,5 +713,41 @@ describe('CodexExecutor', () => {
     await executor.execute({ taskId: 'task-nf', contextId: 'ctx-nf', userMessage: message }, createEventBus().eventBus)
 
     expect(startThread).toHaveBeenCalledTimes(1)
+  })
+
+  it('redirects a live thread to a different inbound thread id', async () => {
+    const startThread = vi.fn(() => ({
+      runStreamed: async () => ({
+        events: (async function* () {
+          yield { type: 'thread.started', thread_id: 't1' } as ThreadEvent
+          yield {
+            type: 'turn.completed',
+            usage: { input_tokens: 1, cached_input_tokens: 0, output_tokens: 1 },
+          } as ThreadEvent
+        })(),
+      }),
+    }))
+    const resumeThread = vi.fn(() => ({ runStreamed: async () => ({ events: (async function* () {})() }) }))
+    const codex = { startThread, resumeThread }
+    const executor = new CodexExecutor({ codex, logger: createSilentLogger() })
+
+    // First request establishes a live thread with id 't1'.
+    await executor.execute(reqCtx('task-d1', 'ctx-d', 'first'), createEventBus().eventBus)
+    expect(startThread).toHaveBeenCalledTimes(1)
+
+    // Second request on the same context asks for a DIFFERENT thread id → resume it.
+    const message: Message = {
+      kind: 'message',
+      role: 'user',
+      messageId: 'm',
+      taskId: 'task-d2',
+      contextId: 'ctx-d',
+      parts: [{ kind: 'text', text: 'second' }],
+      metadata: { codexAgent: { threadId: 't2' } },
+    }
+    await executor.execute({ taskId: 'task-d2', contextId: 'ctx-d', userMessage: message }, createEventBus().eventBus)
+
+    expect(resumeThread).toHaveBeenCalledWith('t2', expect.anything())
+    expect(startThread).toHaveBeenCalledTimes(1) // live thread redirected, not recreated
   })
 })

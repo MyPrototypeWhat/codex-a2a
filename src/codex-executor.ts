@@ -27,6 +27,8 @@ export class CodexExecutor implements AgentExecutor {
   private threadLastUsed = new Map<string, number>()
   private abortControllers = new Map<string, AbortController>()
   private taskContexts = new Map<string, string>()
+  // Retained across clearThreads()/eviction so a thread can be resumed after a cache miss.
+  // Not bounded — grows with the number of distinct contextIds (short strings; see spec §3.2).
   private contextThreadIds = new Map<string, string>()
   private codex: CodexLike
   private maxThreads: number
@@ -156,6 +158,8 @@ export class CodexExecutor implements AgentExecutor {
         this.logger.log('[Codex A2A] event', event)
 
         if (event.type === 'thread.started') {
+          // Resumed threads already have their id set at resume time; this captures it for
+          // freshly started threads (and refreshes it harmlessly if re-emitted).
           if (event.thread_id) this.contextThreadIds.set(contextId, event.thread_id)
           this.publishThreadStarted(eventBus, taskId, contextId, event.thread_id)
           continue
