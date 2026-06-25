@@ -107,6 +107,36 @@ describe('buildCodexInput', () => {
     expect(r.hasContent).toBe(false)
   })
 
+  it('passes through a raw absolute image path inside the working directory', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'codex-a2a-raw-'))
+    const imgPath = join(dir, 'pic.png')
+    writeFileSync(imgPath, Buffer.from(PNG_B64, 'base64'))
+    const r = await buildCodexInput(
+      msg([{ kind: 'file', file: { uri: imgPath, mimeType: 'image/png' } }]),
+      { workingDirectory: dir, logger: silent },
+    )
+    const arr = r.input as ImgPart[]
+    expect(arr[0].path).toBe(imgPath)
+    await r.cleanup()
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('accepts a local image inside an additionalDirectories entry', async () => {
+    const workDir = mkdtempSync(join(tmpdir(), 'codex-a2a-work-'))
+    const extraDir = mkdtempSync(join(tmpdir(), 'codex-a2a-extra-'))
+    const imgPath = join(extraDir, 'pic.png')
+    writeFileSync(imgPath, Buffer.from(PNG_B64, 'base64'))
+    const r = await buildCodexInput(
+      msg([{ kind: 'file', file: { uri: pathToFileURL(imgPath).href, mimeType: 'image/png' } }]),
+      { workingDirectory: workDir, additionalDirectories: [extraDir], logger: silent },
+    )
+    const arr = r.input as ImgPart[]
+    expect(arr[0].path).toBe(imgPath)
+    await r.cleanup()
+    rmSync(workDir, { recursive: true, force: true })
+    rmSync(extraDir, { recursive: true, force: true })
+  })
+
   it('skips remote http(s) image URIs', async () => {
     const r = await buildCodexInput(
       msg([

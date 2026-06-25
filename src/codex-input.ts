@@ -45,6 +45,9 @@ function isImage(mimeType?: string, name?: string): boolean {
   return ext ? IMAGE_EXTENSIONS.has(ext) : false
 }
 
+// Lexical containment check after resolve(); handles `..` and percent-encoding, but does
+// NOT resolve symlinks — a symlink planted inside an allowed dir pointing outside it would
+// still pass. Acceptable for the trusted-workspace threat model (see spec §4.2).
 function isWithin(child: string, parent: string): boolean {
   const c = resolve(child)
   const p = resolve(parent)
