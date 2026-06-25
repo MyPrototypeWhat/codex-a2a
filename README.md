@@ -133,6 +133,45 @@ const server = new CodexA2AServer({
 await server.stop()
 ```
 
+### Resuming threads
+
+Each context's Codex thread is cached in memory and survives LRU eviction. To resume
+a thread across a server restart, capture the id the server surfaces on `thread.started`
+(`status-update.metadata.codexAgent.threadId`) and send it back on a later message:
+
+```ts
+const message = {
+  kind: 'message',
+  role: 'user',
+  messageId: crypto.randomUUID(),
+  parts: [{ kind: 'text', text: 'continue' }],
+  metadata: { codexAgent: { threadId: savedThreadId } },
+}
+```
+
+The legacy key `metadata.codexThreadId` is also accepted. Resumed sessions are read
+from `~/.codex/sessions`.
+
+### Image input
+
+Send A2A `file` parts with an `image/*` MIME type alongside (or instead of) text.
+Inline base64 bytes are written to a temp file and removed after the turn; local
+`file://` paths are passed through only when they resolve inside the working directory
+(or a configured `additionalDirectories` entry). Remote `http(s)` URIs and non-image
+files are ignored.
+
+```ts
+const message = {
+  kind: 'message',
+  role: 'user',
+  messageId: crypto.randomUUID(),
+  parts: [
+    { kind: 'text', text: 'What is in this screenshot?' },
+    { kind: 'file', file: { bytes: base64Png, mimeType: 'image/png', name: 'shot.png' } },
+  ],
+}
+```
+
 ## API
 
 ```ts
@@ -148,7 +187,7 @@ server.cancelTask(taskId)
 
 When connected to the A2A server, the following Codex items are surfaced as A2A updates:
 
-- `thread.started` -> `status-update`
+- `thread.started` -> `status-update` (exposes `metadata.codexAgent.threadId`)
 - `agent_message` -> `status-update` (text message)
 - `reasoning` -> `status-update` (thought payload)
 - `command_execution` -> `status-update` + `artifact-update` (stdout/stderr)
