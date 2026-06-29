@@ -97,7 +97,10 @@ const server = new CodexA2AServer({
 })
 ```
 
-`getWorkingDirectory(contextId)` provides a per-context working directory override.
+Set the working directory per context via `getThreadOptions(contextId).workingDirectory`.
+
+> `getWorkingDirectory(contextId)` is **deprecated** — it still works and takes precedence when both
+> are set, but prefer the single `getThreadOptions` knob.
 
 `getTurnOptions(contextId)` lets you override per-turn options for `runStreamed`, such as `outputSchema` or `signal`.
 
